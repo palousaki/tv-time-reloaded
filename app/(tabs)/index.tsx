@@ -165,10 +165,17 @@ export default function MyShowsScreen() {
 
   // Watching vs. Up to Date is decided by each show's next-episode data, not
   // by a stored status, so prefetch it for every watching-status show up
-  // front regardless of which of the two tabs is active.
-  useEffect(() => {
-    watchingShows.forEach((show) => loadNextEpisode(show));
-  }, [watchingShows, loadNextEpisode]);
+  // front regardless of which of the two tabs is active. Re-runs on focus
+  // (not just when watchingShows changes) because a show's entry can get
+  // invalidated from the detail screen while this list stays mounted in the
+  // background — without a focus re-check, a show whose entry was
+  // invalidated elsewhere drops out of the list and never gets reloaded
+  // since its own row (and that row's focus effect) is no longer mounted.
+  useFocusEffect(
+    useCallback(() => {
+      watchingShows.forEach((show) => loadNextEpisode(show));
+    }, [watchingShows, loadNextEpisode])
+  );
 
   const filteredShows = useMemo(() => {
     const matchesQuery = (show: Show) =>
@@ -220,6 +227,14 @@ export default function MyShowsScreen() {
   }, [sortedShows, activeTab, entries]);
 
   const activeLabel = TABS.find((tab) => tab.key === activeTab)?.label ?? '';
+
+  // Watching/Up to Date depend on per-show TMDB lookups that resolve after
+  // the shows list itself loads — until every watching-status show's entry
+  // is 'ready', treat the tab as still loading so the empty state doesn't
+  // flash before those lookups finish.
+  const nextEpisodesLoading =
+    (activeTab === 'watching' || activeTab === 'up_to_date') &&
+    watchingShows.some((show) => entries[show.id]?.status !== 'ready');
 
   function openTabMenu() {
     tabTriggerRef.current?.measureInWindow((x, y, width, height) => {
@@ -302,7 +317,7 @@ export default function MyShowsScreen() {
         stickySectionHeadersEnabled={false}
         keyboardShouldPersistTaps="handled"
         ListEmptyComponent={
-          !loading ? (
+          !loading && !nextEpisodesLoading ? (
             <Text style={styles.empty}>
               {normalizedQuery ? 'No shows match your search.' : 'No shows here yet.'}
             </Text>

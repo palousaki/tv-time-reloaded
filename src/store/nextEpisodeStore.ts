@@ -135,6 +135,7 @@ export const useNextEpisodeStore = create<NextEpisodeState>((set, get) => ({
     const updated = await useShowsStore.getState().updateShow(show.id, {
       last_watched_season: episode.seasonNumber,
       last_watched_episode: episode.episodeNumber,
+      updated_at: new Date().toISOString(),
     });
 
     const { episode: nextEpisode, seriesEnded } = await findNextEpisode(updated);

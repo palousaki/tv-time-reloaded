@@ -248,6 +248,7 @@ export default function ShowDetailScreen() {
       const updated = await updateShow(show.id, {
         last_watched_season: seasonNumber,
         last_watched_episode: episodeNumber,
+        updated_at: new Date().toISOString(),
       });
       setShow(updated);
     } catch (err) {
