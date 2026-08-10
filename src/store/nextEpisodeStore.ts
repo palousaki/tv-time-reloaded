@@ -4,7 +4,7 @@ import { supabase } from '@/lib/supabase';
 import { getSeasonDetails, getTvShowDetails, hasSeriesEnded } from '@/lib/tmdb';
 import { useAuthStore } from '@/store/authStore';
 import { useShowsStore } from '@/store/showsStore';
-import type { Show } from '@/types';
+import type { Show, TmdbEpisode, TmdbSeasonSummary } from '@/types';
 
 export interface NextEpisode {
   seasonNumber: number;
@@ -12,7 +12,9 @@ export interface NextEpisode {
   name: string;
   airDate: string | null;
   isPremiere: boolean;
+  isFinale: boolean;
   hasAired: boolean;
+  episodesRemaining: number;
 }
 
 // No air date at all almost always means TMDB has an announced-but-unscheduled
@@ -21,6 +23,35 @@ export interface NextEpisode {
 function hasEpisodeAired(airDate: string | null): boolean {
   if (!airDate) return false;
   return new Date(airDate).getTime() <= Date.now();
+}
+
+// Counts aired-but-unwatched episodes from `target` onward. Only fetches
+// season details beyond the already-fetched target season, and stops at the
+// first not-yet-aired episode it finds — episodes air in order, so nothing
+// later could have aired already.
+async function countEpisodesRemaining(
+  tmdbId: number,
+  seasons: TmdbSeasonSummary[],
+  target: { seasonNumber: number; episodeNumber: number },
+  targetSeasonEpisodes: TmdbEpisode[],
+  watched: Set<string>
+): Promise<number> {
+  let remaining = 0;
+  for (const season of seasons) {
+    if (season.season_number < target.seasonNumber) continue;
+    const episodes =
+      season.season_number === target.seasonNumber
+        ? targetSeasonEpisodes
+        : (await getSeasonDetails(tmdbId, season.season_number)).episodes;
+
+    for (const ep of episodes) {
+      if (season.season_number === target.seasonNumber && ep.episode_number < target.episodeNumber) continue;
+      if (watched.has(episodeKey(season.season_number, ep.episode_number))) continue;
+      if (!hasEpisodeAired(ep.air_date)) return remaining;
+      remaining++;
+    }
+  }
+  return remaining;
 }
 
 type Entry =
@@ -76,6 +107,17 @@ async function findNextEpisode(show: Show): Promise<NextEpisodeResult> {
   const episode = seasonDetails.episodes.find((e) => e.episode_number === target!.episodeNumber);
   if (!episode) return { episode: null, seriesEnded };
 
+  const isFinale =
+    target.episodeNumber === Math.max(...seasonDetails.episodes.map((e) => e.episode_number));
+
+  const episodesRemaining = await countEpisodesRemaining(
+    show.tmdb_id,
+    seasons,
+    target,
+    seasonDetails.episodes,
+    watched
+  );
+
   return {
     episode: {
       seasonNumber: target.seasonNumber,
@@ -83,7 +125,9 @@ async function findNextEpisode(show: Show): Promise<NextEpisodeResult> {
       name: episode.name,
       airDate: episode.air_date,
       isPremiere: target.episodeNumber === 1,
+      isFinale,
       hasAired: hasEpisodeAired(episode.air_date),
+      episodesRemaining,
     },
     seriesEnded,
   };

@@ -98,6 +98,11 @@ function ShowRow({ show }: { show: Show }) {
               <Text style={styles.episodeName} numberOfLines={1}>
                 {episode.name}
               </Text>
+              {episode.hasAired && episode.episodesRemaining > 0 && (
+                <Text style={styles.remainingText}>
+                  {episode.episodesRemaining} episode{episode.episodesRemaining === 1 ? '' : 's'} to catch up
+                </Text>
+              )}
               <View style={styles.badgeRow}>
                 {!episode.hasAired ? (
                   <View style={styles.badgeUpcoming}>
@@ -110,6 +115,11 @@ function ShowRow({ show }: { show: Show }) {
                     {episode.isPremiere && (
                       <View style={styles.badgePremiere}>
                         <Text style={styles.badgePremiereText}>PREMIERE</Text>
+                      </View>
+                    )}
+                    {episode.isFinale && (
+                      <View style={styles.badgePremiere}>
+                        <Text style={styles.badgePremiereText}>SEASON FINALE</Text>
                       </View>
                     )}
                     {isRecentlyAired(episode.airDate) && (
@@ -212,8 +222,19 @@ export default function MyShowsScreen() {
     for (const show of sortedShows) {
       const entry = entries[show.id];
       const isUpcoming = entry?.status === 'ready' && entry.episode !== null && !entry.episode.hasAired;
+      // A season/series premiere that just aired means fresh content is
+      // waiting regardless of how long ago `updated_at` was touched — that's
+      // "continue watching," not "you've neglected this."
+      const isFreshPremiere =
+        entry?.status === 'ready' &&
+        entry.episode !== null &&
+        entry.episode.hasAired &&
+        entry.episode.isPremiere &&
+        isRecentlyAired(entry.episode.airDate);
       if (isUpcoming) {
         upcoming.push(show);
+      } else if (isFreshPremiere) {
+        continuing.push(show);
       } else {
         (daysSince(show.updated_at) > STALE_DAYS ? stale : continuing).push(show);
       }
@@ -429,6 +450,7 @@ const styles = StyleSheet.create({
   namePillText: { color: Colors.textPrimary, fontSize: 11, fontWeight: '700', letterSpacing: 0.3, flexShrink: 1 },
   episodeCode: { color: Colors.textPrimary, fontSize: 16, fontWeight: '700' },
   episodeName: { color: Colors.textSecondary, fontSize: 13 },
+  remainingText: { color: Colors.textMuted, fontSize: 11, marginTop: 2 },
   badgeRow: { flexDirection: 'row', gap: 6, marginTop: 6 },
   badgePremiere: { backgroundColor: Colors.textPrimary, borderRadius: 4, paddingVertical: 2, paddingHorizontal: 6 },
   badgePremiereText: { color: Colors.background, fontSize: 10, fontWeight: '700' },
