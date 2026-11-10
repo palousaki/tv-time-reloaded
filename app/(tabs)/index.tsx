@@ -6,9 +6,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/colors';
 import { posterUrl } from '@/lib/tmdb';
-import { useNextEpisodeStore } from '@/store/nextEpisodeStore';
+import { showDialog } from '@/store/dialogStore';
+import { useNextEpisodeStore, type MarkWatchedUndo, type ShowSummary } from '@/store/nextEpisodeStore';
 import { useShowsStore } from '@/store/showsStore';
-import type { Show } from '@/types';
+import type { Show, ShowStatus } from '@/types';
 
 // "Watching" and "Up to Date" are both the `watching` ShowStatus under the
 // hood, split at render time by whether TMDB still has an unwatched episode
@@ -23,6 +24,14 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'plan_to_watch', label: 'Plan to Watch' },
 ];
 
+const STATUS_LABELS: Record<ShowStatus, string> = {
+  watching: 'Watching',
+  completed: 'Finished',
+  dropped: 'Dropped',
+  plan_to_watch: 'Plan to Watch',
+};
+
+const UNDO_TIMEOUT_MS = 5000;
 const STALE_DAYS = 14;
 const NEW_WINDOW_DAYS = 7;
 
@@ -45,10 +54,89 @@ function formatAirDate(airDate: string | null) {
   return new Date(airDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function ShowRow({ show }: { show: Show }) {
+function timeAgo(dateString: string) {
+  const days = Math.floor(daysSince(dateString));
+  if (days < 1) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 30) return `${days} days ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`;
+  const years = Math.floor(days / 365);
+  return `${years} year${years === 1 ? '' : 's'} ago`;
+}
+
+function formatHours(minutes: number) {
+  const hours = Math.round(minutes / 60);
+  return hours < 1 ? `~${minutes}m` : `~${hours}h`;
+}
+
+
+const TMDB_STATUS_TEXT: Partial<Record<ShowSummary['tmdbStatus'], string>> = {
+  'Returning Series': 'Returning series · awaiting new episodes',
+  'In Production': 'In production',
+  Planned: 'New season planned',
+  Pilot: 'Pilot',
+};
+
+// Up to Date: where you left off, and whether more is coming.
+function UpToDateInfo({ summary, lastWatchedAt }: { summary: ShowSummary; lastWatchedAt: string | null }) {
+  const statusText = TMDB_STATUS_TEXT[summary.tmdbStatus];
+  return (
+    <>
+      {summary.lastWatched && (
+        <Text style={styles.episodeCode}>
+          S{pad(summary.lastWatched.seasonNumber)} | E{pad(summary.lastWatched.episodeNumber)}
+        </Text>
+      )}
+      {lastWatchedAt && <Text style={styles.episodeName}>Last watched {timeAgo(lastWatchedAt)}</Text>}
+      {statusText && <Text style={styles.remainingText}>{statusText}</Text>}
+    </>
+  );
+}
+
+// Finished: a short recap of the series.
+function FinishedInfo({ summary }: { summary: ShowSummary }) {
+  const { seasonCount, episodeCount, totalMinutes, firstAirYear, lastAirYear } = summary;
+  const years =
+    firstAirYear && lastAirYear && lastAirYear !== firstAirYear
+      ? `${firstAirYear}–${lastAirYear}`
+      : firstAirYear
+        ? String(firstAirYear)
+        : null;
+  return (
+    <>
+      <Text style={styles.statsText}>
+        {seasonCount} season{seasonCount === 1 ? '' : 's'} · {episodeCount} episode{episodeCount === 1 ? '' : 's'} ·{' '}
+        {formatHours(totalMinutes)}
+      </Text>
+      {years && <Text style={styles.episodeName}>Aired {years}</Text>}    </>
+  );
+}
+
+// TMDB air dates are plain 'YYYY-MM-DD' — compare as local calendar days so
+// "tomorrow" means tomorrow where the user is, not in UTC.
+function calendarDaysUntil(airDate: string) {
+  const [y, m, d] = airDate.split('-').map(Number);
+  const air = new Date(y, m - 1, d).getTime();
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Math.round((air - today) / 86_400_000);
+}
+
+function upcomingLabel(airDate: string | null) {
+  if (!airDate) return 'NOT YET AIRED';
+  const days = calendarDaysUntil(airDate);
+  if (days <= 0) return 'AIRS TODAY';
+  if (days === 1) return 'AIRS TOMORROW';
+  if (days <= 30) return `AIRS IN ${days} DAYS`;
+  return `AIRS ${formatAirDate(airDate)}`;
+}
+
+function ShowRow({ show, onMarked }: { show: Show; onMarked: (show: Show, undo: MarkWatchedUndo) => void }) {
   const entry = useNextEpisodeStore((state) => state.entries[show.id]);
   const load = useNextEpisodeStore((state) => state.load);
   const markWatched = useNextEpisodeStore((state) => state.markWatched);
+  const changeStatus = useNextEpisodeStore((state) => state.changeStatus);
   const [marking, setMarking] = useState(false);
 
   useFocusEffect(
@@ -62,19 +150,52 @@ function ShowRow({ show }: { show: Show }) {
     if (marking) return;
     setMarking(true);
     try {
-      await markWatched(show);
+      const undo = await markWatched(show);
+      if (undo) onMarked(show, undo);
+    } catch (err) {
+      showDialog('Failed to mark episode', err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setMarking(false);
     }
   }
 
+  function confirmStatusChange(status: ShowStatus) {
+    // Finished also bulk-marks every unwatched episode, so spell that out.
+    const message =
+      status === 'completed'
+        ? 'All unwatched episodes will be marked as watched.'
+        : undefined;
+    showDialog(`Move ${show.name} to ${STATUS_LABELS[status]}?`, message, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Move',
+        onPress: () => {
+          changeStatus(show, status).catch((err) =>
+            showDialog('Failed to update status', err instanceof Error ? err.message : 'Unknown error')
+          );
+        },
+      },
+    ]);
+  }
+
+  function handleLongPress() {
+    const options = (Object.keys(STATUS_LABELS) as ShowStatus[]).filter((status) => status !== show.status);
+    showDialog(show.name, 'Move to…', [
+      ...options.map((status) => ({
+        text: STATUS_LABELS[status],
+        onPress: () => confirmStatusChange(status),
+      })),
+      { text: 'Cancel', style: 'cancel' as const },
+    ]);
+  }
+
   const isLoading = !entry || entry.status === 'loading';
   const episode = entry?.status === 'ready' ? entry.episode : null;
-  const seriesEnded = entry?.status === 'ready' ? entry.seriesEnded : false;
+  const ready = entry?.status === 'ready' ? entry : null;
 
   return (
     <Link href={{ pathname: '/show/[id]', params: { id: show.id } }} asChild>
-      <Pressable style={styles.card}>
+      <Pressable style={styles.card} onLongPress={handleLongPress}>
         <Image
           source={{ uri: posterUrl(show.poster_path, 'w154') ?? undefined }}
           style={styles.poster}
@@ -106,9 +227,7 @@ function ShowRow({ show }: { show: Show }) {
               <View style={styles.badgeRow}>
                 {!episode.hasAired ? (
                   <View style={styles.badgeUpcoming}>
-                    <Text style={styles.badgeUpcomingText}>
-                      {formatAirDate(episode.airDate) ? `AIRS ${formatAirDate(episode.airDate)}` : 'NOT YET AIRED'}
-                    </Text>
+                    <Text style={styles.badgeUpcomingText}>{upcomingLabel(episode.airDate)}</Text>
                   </View>
                 ) : (
                   <>
@@ -131,11 +250,11 @@ function ShowRow({ show }: { show: Show }) {
                 )}
               </View>
             </>
-          ) : seriesEnded ? (
-            <Text style={styles.finished}>Series finished</Text>
-          ) : (
-            <Text style={styles.caughtUp}>All caught up</Text>
-          )}
+          ) : ready && show.status === 'completed' ? (
+            <FinishedInfo summary={ready.summary} />
+          ) : ready ? (
+            <UpToDateInfo summary={ready.summary} lastWatchedAt={ready.lastWatchedAt} />
+          ) : null}
         </View>
 
         {episode && episode.hasAired && (
@@ -160,14 +279,43 @@ export default function MyShowsScreen() {
   const [query, setQuery] = useState('');
   const [sortAlpha, setSortAlpha] = useState(false);
   const [tabMenuOpen, setTabMenuOpen] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => new Set());
   const [tabMenuAnchor, setTabMenuAnchor] = useState<{ x: number; y: number; width: number; height: number } | null>(
     null
   );
   const tabTriggerRef = useRef<View>(null);
+  const undoMarkWatched = useNextEpisodeStore((state) => state.undoMarkWatched);
+  const [pendingUndo, setPendingUndo] = useState<{ show: Show; undo: MarkWatchedUndo } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     fetchShows();
   }, []);
+
+  useEffect(
+    () => () => {
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    },
+    []
+  );
+
+  const handleMarked = useCallback((show: Show, undo: MarkWatchedUndo) => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    setPendingUndo({ show, undo });
+    undoTimerRef.current = setTimeout(() => setPendingUndo(null), UNDO_TIMEOUT_MS);
+  }, []);
+
+  async function handleUndo() {
+    if (!pendingUndo) return;
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    const { show, undo } = pendingUndo;
+    setPendingUndo(null);
+    try {
+      await undoMarkWatched(show, undo);
+    } catch (err) {
+      showDialog('Failed to undo', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
 
   const normalizedQuery = query.trim().toLowerCase();
 
@@ -211,7 +359,9 @@ export default function MyShowsScreen() {
 
   const sections = useMemo(() => {
     if (activeTab !== 'watching') {
-      return sortedShows.length > 0 ? [{ title: null as string | null, data: sortedShows }] : [];
+      return sortedShows.length > 0
+        ? [{ title: null as string | null, data: sortedShows }]
+        : [];
     }
 
     // Sort (if any) is applied before grouping, so A–Z ordering is preserved
@@ -236,16 +386,54 @@ export default function MyShowsScreen() {
       } else if (isFreshPremiere) {
         continuing.push(show);
       } else {
-        (daysSince(show.updated_at) > STALE_DAYS ? stale : continuing).push(show);
+        // Last real watch, not shows.updated_at (which any edit bumps). A
+        // show with no watches yet counts from when it was added.
+        const lastActivity = (entry?.status === 'ready' && entry.lastWatchedAt) || show.created_at;
+        (daysSince(lastActivity) > STALE_DAYS ? stale : continuing).push(show);
       }
     }
 
+    // Custom ordering only when A–Z isn't on, so the toggle still means A–Z.
+    if (!sortAlpha) {
+      const nextEp = (show: Show) => {
+        const entry = entries[show.id];
+        return entry?.status === 'ready' ? entry.episode : null;
+      };
+      // Fresh stuff (NEW or PREMIERE badge) floats to the top; Array.sort is
+      // stable, so the existing order is kept within each group.
+      const freshRank = (show: Show) => {
+        const ep = nextEp(show);
+        return ep && (ep.isPremiere || isRecentlyAired(ep.airDate)) ? 0 : 1;
+      };
+      continuing.sort((a, b) => freshRank(a) - freshRank(b));
+      // Soonest air date first; undated (unscheduled) episodes last.
+      const airTime = (show: Show) => {
+        const airDate = nextEp(show)?.airDate;
+        return airDate ? new Date(airDate).getTime() : Number.POSITIVE_INFINITY;
+      };
+      upcoming.sort((a, b) => airTime(a) - airTime(b));
+    }
+
+    // Collapsed sections keep their header but render no rows.
     const result: { title: string | null; data: Show[] }[] = [];
-    if (continuing.length > 0) result.push({ title: 'Continue Watching', data: continuing });
-    if (upcoming.length > 0) result.push({ title: 'Upcoming', data: upcoming });
-    if (stale.length > 0) result.push({ title: "Haven't Watched For a While", data: stale });
+    const push = (title: string, data: Show[]) => {
+      if (data.length === 0) return;
+      result.push({ title, data: collapsedSections.has(title) ? [] : data });
+    };
+    push('Continue Watching', continuing);
+    push("Haven't Watched For a While", stale);
+    push('Upcoming', upcoming);
     return result;
-  }, [sortedShows, activeTab, entries]);
+  }, [sortedShows, activeTab, entries, collapsedSections, sortAlpha]);
+
+  function toggleSection(title: string) {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(title)) next.delete(title);
+      else next.add(title);
+      return next;
+    });
+  }
 
   const activeLabel = TABS.find((tab) => tab.key === activeTab)?.label ?? '';
 
@@ -344,15 +532,30 @@ export default function MyShowsScreen() {
             </Text>
           ) : null
         }
-        renderSectionHeader={({ section }) =>
-          section.title ? (
-            <View style={styles.sectionHeaderPill}>
-              <Text style={styles.sectionHeaderText}>{section.title.toUpperCase()}</Text>
-            </View>
-          ) : null
-        }
-        renderItem={({ item }) => <ShowRow show={item} />}
+        renderSectionHeader={({ section }) => {
+          const title = section.title;
+          if (!title) return null;
+          const collapsed = collapsedSections.has(title);
+          return (
+            <Pressable style={styles.sectionHeaderPill} onPress={() => toggleSection(title)} hitSlop={8}>
+              <Text style={styles.sectionHeaderText}>{title.toUpperCase()}</Text>
+              <Ionicons name={collapsed ? 'chevron-down' : 'chevron-up'} size={14} color={Colors.textSecondary} />
+            </Pressable>
+          );
+        }}
+        renderItem={({ item }) => <ShowRow show={item} onMarked={handleMarked} />}
       />
+
+      {pendingUndo && (
+        <View style={styles.snackbar}>
+          <Text style={styles.snackbarText} numberOfLines={1}>
+            Marked {pendingUndo.show.name} S{pad(pendingUndo.undo.seasonNumber)}E{pad(pendingUndo.undo.episodeNumber)}
+          </Text>
+          <Pressable onPress={handleUndo} hitSlop={8}>
+            <Text style={styles.snackbarAction}>UNDO</Text>
+          </Pressable>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -416,6 +619,9 @@ const styles = StyleSheet.create({
   menuItemTextActive: { color: Colors.textPrimary, fontWeight: '700' },
   list: { padding: 16, paddingTop: 4 },
   sectionHeaderPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     alignSelf: 'center',
     backgroundColor: Colors.surfaceAlt,
     borderRadius: 16,
@@ -464,8 +670,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
   },
   badgeUpcomingText: { color: Colors.textMuted, fontSize: 10, fontWeight: '700' },
-  caughtUp: { color: Colors.textMuted, fontSize: 13, fontStyle: 'italic' },
-  finished: { color: Colors.success, fontSize: 13, fontWeight: '600' },
+  statsText: { color: Colors.textPrimary, fontSize: 14, fontWeight: '700' },
   rowLoading: { alignSelf: 'flex-start', marginTop: 6 },
   checkButton: {
     width: 40,
@@ -477,6 +682,23 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginRight: 12,
   },
+  snackbar: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    backgroundColor: Colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  snackbarText: { flex: 1, color: Colors.textPrimary, fontSize: 13 },
+  snackbarAction: { color: Colors.accent, fontSize: 13, fontWeight: '700' },
   empty: { textAlign: 'center', marginTop: 40, color: Colors.textFaint },
   error: { color: Colors.error, paddingHorizontal: 16, paddingBottom: 8 },
 });

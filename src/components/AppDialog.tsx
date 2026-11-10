@@ -11,6 +11,8 @@ function buttonTextStyle(style: DialogButton['style']) {
 export function AppDialog() {
   const { visible, title, message, buttons } = useDialogStore();
   const hide = useDialogStore((state) => state.hide);
+  // More than two buttons don't fit side by side — stack them instead.
+  const stacked = buttons.length > 2;
 
   function handlePress(button: DialogButton) {
     hide();
@@ -25,13 +27,16 @@ export function AppDialog() {
             <Text style={styles.title}>{title}</Text>
             {message ? <Text style={styles.message}>{message}</Text> : null}
           </View>
-          <View style={styles.buttonRow}>
+          <View style={[styles.buttonRow, stacked && styles.buttonColumn]}>
             {buttons.map((button, index) => (
               <Pressable
                 key={button.text}
                 style={[
                   styles.button,
-                  index > 0 && styles.buttonDivider,
+                  // `flex: 1` in a column with auto height collapses each
+                  // button to its padding and hides the label — size to content.
+                  stacked && styles.buttonStacked,
+                  index > 0 && (stacked ? styles.buttonDividerTop : styles.buttonDivider),
                   buttons.length === 1 && styles.buttonSingle,
                 ]}
                 onPress={() => handlePress(button)}
@@ -77,7 +82,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  buttonColumn: { flexDirection: 'column' },
+  buttonStacked: { flex: 0 },
   buttonSingle: { flex: 1 },
+  buttonDividerTop: {
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
   buttonDivider: {
     borderLeftWidth: 1,
     borderLeftColor: Colors.border,

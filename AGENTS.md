@@ -44,7 +44,9 @@ Done:
 # Windows Build Note
 
 `android/` is gitignored (Expo regenerates it via prebuild). If it's ever
-deleted/regenerated, re-apply the CMake pin in `android/app/build.gradle`:
+deleted/regenerated — including a plain `npx expo prebuild` without
+`--clean` (e.g. to pick up new icons), which also rewrites `build.gradle` —
+re-apply the CMake pin in `android/app/build.gradle`:
 
 ```
 externalNativeBuild {

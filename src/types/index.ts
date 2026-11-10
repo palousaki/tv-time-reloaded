@@ -41,6 +41,7 @@ export interface TmdbShowDetails {
   overview: string;
   poster_path: string | null;
   first_air_date: string | null;
+  last_air_date: string | null;
   number_of_episodes: number;
   number_of_seasons: number;
   episode_run_time: number[];
